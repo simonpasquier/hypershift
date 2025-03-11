@@ -3,6 +3,7 @@ package azureutil
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 
@@ -11,12 +12,51 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v5"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 )
+
+type contextKey int
+
+const correlationIDKey contextKey = iota
+
+func ContextWithCorrelationID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, correlationIDKey, id)
+}
+
+// policyFunc implements the policy.Policy interface.
+type policyFunc func(*policy.Request) (*http.Response, error)
+
+func (pf policyFunc) Do(req *policy.Request) (*http.Response, error) {
+	return pf(req)
+}
+
+func WithCorrelationID(opts policy.ClientOptions) policy.ClientOptions {
+	opts.PerCallPolicies = append(opts.PerCallPolicies, policyFunc(correlationIDPolicy))
+	return opts
+}
+
+// correlationIDPolicy passes the correlation request ID from the current
+// context to the Azure service endpoint.
+func correlationIDPolicy(req *policy.Request) (*http.Response, error) {
+	v := req.Raw().Context().Value(correlationIDKey)
+	cid, ok := v.(string)
+	if ok && cid != "" {
+		req.Raw().Header.Set("x-ms-correlation-request-id", cid)
+	}
+
+	return req.Next()
+}
+
+func armClientOptions() *arm.ClientOptions {
+	return &arm.ClientOptions{
+		ClientOptions: WithCorrelationID(policy.ClientOptions{}),
+	}
+}
 
 // GetSubnetNameFromSubnetID extracts the subnet name from a subnet ID
 // Example subnet ID: /subscriptions/<subscriptionID>/resourceGroups/<resourceGroupName>/providers/Microsoft.Network/virtualNetworks/<vnetName>/subnets/<subnetName>
@@ -113,7 +153,7 @@ func GetVnetInfoFromVnetID(ctx context.Context, vnetID string, subscriptionID st
 
 // getFullVnetInfo gets the full information on a VNET
 func getFullVnetInfo(ctx context.Context, subscriptionID string, vnetResourceGroupName string, clientVnetName string, azureCreds azcore.TokenCredential) (armnetwork.VirtualNetworksClientGetResponse, error) {
-	networksClient, err := armnetwork.NewVirtualNetworksClient(subscriptionID, azureCreds, nil)
+	networksClient, err := armnetwork.NewVirtualNetworksClient(subscriptionID, azureCreds, armClientOptions())
 	if err != nil {
 		return armnetwork.VirtualNetworksClientGetResponse{}, fmt.Errorf("failed to create new virtual networks client: %w", err)
 	}
@@ -153,7 +193,7 @@ func GetNetworkSecurityGroupInfo(ctx context.Context, nsgID string, subscription
 		return armnetwork.SecurityGroupsClientGetResponse{}, fmt.Errorf("failed to parse network security group id %q: %v", nsgID, err)
 	}
 
-	securityGroupClient, err := armnetwork.NewSecurityGroupsClient(subscriptionID, azureCreds, nil)
+	securityGroupClient, err := armnetwork.NewSecurityGroupsClient(subscriptionID, azureCreds, armClientOptions())
 	if err != nil {
 		return armnetwork.SecurityGroupsClientGetResponse{}, fmt.Errorf("failed to create security group client: %w", err)
 	}
@@ -168,7 +208,7 @@ func GetNetworkSecurityGroupInfo(ctx context.Context, nsgID string, subscription
 
 // GetResourceGroupInfo gets the full information on a resource group based on its name
 func GetResourceGroupInfo(ctx context.Context, rgName string, subscriptionID string, azureCreds azcore.TokenCredential) (armresources.ResourceGroupsClientGetResponse, error) {
-	resourceGroupClient, err := armresources.NewResourceGroupsClient(subscriptionID, azureCreds, nil)
+	resourceGroupClient, err := armresources.NewResourceGroupsClient(subscriptionID, azureCreds, armClientOptions())
 	if err != nil {
 		return armresources.ResourceGroupsClientGetResponse{}, fmt.Errorf("failed to create new resource groups client: %w", err)
 	}

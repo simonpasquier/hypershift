@@ -362,6 +362,9 @@ func (r *HostedControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	originalHostedControlPlane := hostedControlPlane.DeepCopy()
 
+	// Store the MS correlation ID (if present) in the context for later use.
+	ctx = contextWithCorrelationID(ctx, originalHostedControlPlane)
+
 	// Return early if deleted
 	if !hostedControlPlane.DeletionTimestamp.IsZero() {
 		condition := &metav1.Condition{
@@ -5496,7 +5499,7 @@ func (r *HostedControlPlaneReconciler) validateAzureKMSConfig(ctx context.Contex
 
 	// Retrieve the KMS UserAssignedCredentials path
 	credentialsPath := config.ManagedAzureCertificateMountPath + hcp.Spec.SecretEncryption.KMS.Azure.KMS.CredentialsSecretName
-	cred, err := dataplane.NewUserAssignedIdentityCredential(ctx, credentialsPath, dataplane.WithClientOpts(azcore.ClientOptions{Cloud: cloud.AzurePublic}))
+	cred, err := dataplane.NewUserAssignedIdentityCredential(ctx, credentialsPath, dataplane.WithClientOpts(clientOptions()))
 	if err != nil {
 		conditions.SetFalseCondition(hcp, hyperv1.ValidAzureKMSConfig, hyperv1.InvalidAzureCredentialsReason,
 			fmt.Sprintf("failed to obtain azure client credentials: %v", err))
@@ -5602,7 +5605,7 @@ func doesOpenShiftTrustedCABundleConfigMapForCPOExist(ctx context.Context, c cli
 // verifyResourceGroupLocationsMatch verifies the locations match for the VNET, network security group, and managed resource groups
 func verifyResourceGroupLocationsMatch(ctx context.Context, hcp *hyperv1.HostedControlPlane) error {
 	certPath := config.ManagedAzureCertificatePath + hcp.Spec.Platform.Azure.ManagedIdentities.ControlPlane.ControlPlaneOperator.CredentialsSecretName
-	creds, err := dataplane.NewUserAssignedIdentityCredential(ctx, certPath, dataplane.WithClientOpts(azcore.ClientOptions{Cloud: cloud.AzurePublic}))
+	creds, err := dataplane.NewUserAssignedIdentityCredential(ctx, certPath, dataplane.WithClientOpts(clientOptions()))
 	if err != nil {
 		return fmt.Errorf("failed to create azure creds to verify resource group locations: %v", err)
 	}
@@ -5627,4 +5630,22 @@ func verifyResourceGroupLocationsMatch(ctx context.Context, hcp *hyperv1.HostedC
 		return fmt.Errorf("the locations of the resource groups do not match - vnet location: %v; network security group location: %v; managed resource group location: %v", ptr.Deref(vnet.Location, ""), ptr.Deref(nsg.Location, ""), ptr.Deref(rg.Location, ""))
 	}
 	return nil
+}
+
+func contextWithCorrelationID(ctx context.Context, hostedControlPlane *hyperv1.HostedControlPlane) context.Context {
+	if !hyperazureutil.IsAroHCP() {
+		return ctx
+	}
+
+	annotations := hostedControlPlane.GetAnnotations()
+	if annotations == nil {
+		return ctx
+	}
+
+	// TODO: agree on the correct annotation key.
+	return hyperazureutil.ContextWithCorrelationID(ctx, annotations["hypershift.openshift.io/ms-correlation-request-id"])
+}
+
+func clientOptions() azcore.ClientOptions {
+	return hyperazureutil.WithCorrelationID(azcore.ClientOptions{Cloud: cloud.AzurePublic})
 }
